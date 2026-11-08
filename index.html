@@ -458,6 +458,12 @@ dialog#modal.vert{width:min(420px,calc(100vw - 24px));margin:auto;left:0;right:0
 .rbtn.mid{width:68px;height:68px;background:rgba(229,9,20,.9)}
 .rbtn.sk{width:52px;height:52px}
 .rbtn.sk svg{width:72%;height:72%}
+.rplayer.yt{position:relative}
+.ytHost,.ytHost iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:block}
+.ytShield{position:absolute;inset:0;z-index:1}
+.rplayer.yt .rbar{z-index:2}
+.rprog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.2);z-index:2;pointer-events:none}
+.rprog i{display:block;height:100%;width:0;background:var(--red);box-shadow:0 0 10px var(--red)}
 .rbtn.sk b{position:absolute;font-size:.62rem;font-weight:700;top:50%;left:50%;transform:translate(-50%,-38%)}
 .vert .mtxt,.vert .mtxt h3{text-align:center;text-wrap:balance}
 .vert .mtxt h3{padding-right:0;font-size:1.7rem}
@@ -887,12 +893,90 @@ dialog#modal.vert{width:min(420px,calc(100vw - 24px));margin:auto;left:0;right:0
   /* ---------- project dialog ---------- */
   var modal = $("modal"), mvid = $("mvid"), lastTrigger = null;
 
+  var ytCur = null, ytTimer = null;
   function releasePlayer() {
+    clearInterval(ytTimer); ytTimer = null;
+    if (ytCur) { try { ytCur.destroy(); } catch (e) {} ytCur = null; }
     var v = mvid.querySelector("video");
     if (v) { try { v.pause(); } catch (e) {} v.removeAttribute("src"); try { v.load(); } catch (e) {} }
     var f = mvid.querySelector("iframe");
     if (f) f.src = "about:blank";
     mvid.textContent = "";
+  }
+  /* YouTube videos: site-themed controls on top of YouTube's official player API (YouTube's own control bar is switched off) */
+  var ytApi = null;
+  function loadYT() {
+    if (ytApi) return ytApi;
+    ytApi = new Promise(function (resolve, reject) {
+      if (window.YT && window.YT.Player) return resolve(window.YT);
+      var prev = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = function () { if (prev) try { prev(); } catch (e) {} resolve(window.YT); };
+      var sc = doc.createElement("script"); sc.src = "https://www.youtube.com/iframe_api"; sc.async = true;
+      sc.onerror = function () { ytApi = null; reject(new Error("yt")); };
+      doc.head.appendChild(sc);
+      setTimeout(function () { reject(new Error("timeout")); }, 8000);
+    });
+    return ytApi;
+  }
+  function ytPlayer(id, plainSrc, title) {
+    var wrap = el("div", { class: "rplayer yt show" });
+    var host = el("div", { class: "ytHost" }), shield = el("div", { class: "ytShield" });
+    var fill = el("i"), prog = el("div", { class: "rprog" }, fill);
+    var ico = {
+      play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>',
+      pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/></svg>',
+      back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2L7 6.5 12 11V8a5 5 0 1 1-5 5H5a7 7 0 1 0 7-8z" fill="currentColor"/></svg><b>10</b>',
+      fwd: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2l5 4.5L12 11V8a5 5 0 1 0 5 5h2a7 7 0 1 1-7-8z" fill="currentColor"/></svg><b>10</b>'
+    };
+    var pl = null, ready = false, playing = false, hideT = null;
+    function poke() {
+      wrap.classList.add("show"); clearTimeout(hideT);
+      if (playing) hideT = setTimeout(function () { wrap.classList.remove("show"); }, 2200);
+    }
+    function toggle() { if (!ready) return; if (playing) pl.pauseVideo(); else pl.playVideo(); }
+    function seek(d) { if (!ready) return; var t = pl.getCurrentTime() + d, du = pl.getDuration() || 1e9; pl.seekTo(Math.max(0, Math.min(du - 0.3, t)), true); }
+    function btn(cls, label, html, fn) {
+      var b = el("button", { class: "rbtn " + cls, type: "button", "aria-label": label });
+      b.innerHTML = html;
+      b.addEventListener("click", function (e) { e.stopPropagation(); fn(); poke(); });
+      return b;
+    }
+    var mid = btn("mid", "Play or pause", ico.pause, toggle);
+    var bar = el("div", { class: "rbar" }, btn("sk", "Back 10 seconds", ico.back, function () { seek(-10); }), mid, btn("sk", "Forward 10 seconds", ico.fwd, function () { seek(10); }));
+    shield.addEventListener("click", function () { if (wrap.classList.contains("show")) toggle(); poke(); });
+    wrap.append(host, shield, bar, prog);
+    var failed = false;
+    function plain() {
+      if (failed) return; failed = true;
+      clearInterval(ytTimer);
+      if (ytCur) { try { ytCur.destroy(); } catch (e) {} ytCur = null; }
+      mvid.textContent = "";
+      mvid.append(el("iframe", { src: plainSrc, title: title + " (YouTube video)", allow: "autoplay; fullscreen; picture-in-picture; encrypted-media", allowfullscreen: true, referrerpolicy: "strict-origin-when-cross-origin" }));
+    }
+    loadYT().then(function (YT) {
+      if (failed || !wrap.isConnected) return;
+      var vars = { autoplay: 1, controls: 0, rel: 0, playsinline: 1, disablekb: 1, fs: 0, iv_load_policy: 3, modestbranding: 1, cc_load_policy: 0 };
+      if (/^https?:$/.test(location.protocol)) vars.origin = location.origin;
+      pl = new YT.Player(host, {
+        videoId: id, width: "100%", height: "100%", playerVars: vars,
+        events: {
+          onReady: function (e) { ready = true; try { e.target.playVideo(); } catch (x) {} },
+          onStateChange: function (e) {
+            var st = e.data; playing = (st === 1 || st === 3);
+            mid.innerHTML = playing ? ico.pause : ico.play;
+            if (st === 2 || st === 0) wrap.classList.add("show"); else poke();
+          },
+          onError: plain
+        }
+      });
+      ytCur = pl;
+      clearInterval(ytTimer);
+      ytTimer = setInterval(function () {
+        if (!ready) return;
+        try { var d = pl.getDuration(); if (d) fill.style.width = Math.min(100, pl.getCurrentTime() / d * 100) + "%"; } catch (x) {}
+      }, 250);
+    }).catch(plain);
+    return wrap;
   }
   /* vertical reels: own minimal player (play/pause, back 10s, forward 10s); falls back to Drive's player if the file cannot be streamed */
   function reelPlayer(fileId, fallbackSrc, title) {
@@ -957,7 +1041,10 @@ dialog#modal.vert{width:min(420px,calc(100vw - 24px));margin:auto;left:0;right:0
     $("mdesc").hidden = !p.description;
     var v = parseVideo(p.video);
     var dm = (v.type === "embed" && p.vertical && v.provider === "Google Drive") ? String(v.src).match(/\/file\/d\/([^/]+)/) : null;
-    if (dm) {
+    var ym = (v.type === "embed" && v.provider === "YouTube") ? String(v.src).match(/\/embed\/([\w-]+)\?/) : null;
+    if (ym && ym[1] !== "videoseries") {
+      mvid.append(ytPlayer(ym[1], v.src, p.title));
+    } else if (dm) {
       mvid.append(reelPlayer(dm[1], v.src, p.title));
     } else if (v.type === "embed") {
       mvid.append(el("iframe", {
